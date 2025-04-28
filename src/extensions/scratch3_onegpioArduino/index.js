@@ -26,15 +26,6 @@ const ArgumentType = require('../../extension-support/argument-type');
 const BlockType = require('../../extension-support/block-type');
 const formatMessage = require('format-message');
 
-// Add these constants at the top of the file, after the existing constants
-const SIMULATION_MODE = true; // Flag to indicate we're running in simulation
-const SIMULATION_UPDATE_RATE = 100; // Update rate in ms for simulation
-
-// Add these variables with the other let declarations
-let mockDigitalInputs = new Array(32).fill(0);
-let mockAnalogInputs = new Array(8).fill(0);
-let simulationInterval = null;
-
 
 // The following are constants used within the extension
 
@@ -74,14 +65,15 @@ let connected = false;
 let digital_inputs = new Array(32);
 let analog_inputs = new Array(8);
 
-// flag to indicate if a websocket connect was
-// ever attempted.
-let connect_attempt = false;
-
 // an array to buffer operations until socket is opened
 let wait_open = [];
 
 let the_locale = null;
+
+let serialPort = null;
+let reader = null;
+let writer = null;
+let readLoopActive = false;
 
 // common
 const FormDigitalWrite = {
@@ -277,42 +269,8 @@ class Scratch3ArduinoOneGPIO {
     constructor(runtime) {
         the_locale = this._setLocale();
         this.runtime = runtime;
-
-        if (SIMULATION_MODE) {
-            // Initialize simulation immediately
-            this._setupSimulation();
-        }
     }
 
-    _setupSimulation() {
-        console.log('Setting up Arduino simulation mode');
-        
-        // Clear any existing interval
-        if (simulationInterval) {
-            clearInterval(simulationInterval);
-        }
-
-        // Initialize mock values
-        mockAnalogInputs = new Array(8).fill(0);
-        mockDigitalInputs = new Array(32).fill(0);
-
-        // Setup simulation update interval
-        simulationInterval = setInterval(() => {
-            // Update analog inputs (0-1023)
-            for (let i = 0; i < mockAnalogInputs.length; i++) {
-                mockAnalogInputs[i] = Math.floor(Math.random() * 1024);
-            }
-            
-            // Update some digital inputs randomly
-            for (let i = 0; i < mockDigitalInputs.length; i++) {
-                if (Math.random() > 0.9) { // 10% chance to change state
-                    mockDigitalInputs[i] = Math.random() > 0.5 ? 1 : 0;
-                }
-            }
-            
-            console.log('Analog Pin 0:', mockAnalogInputs[0]); // Debug log
-        }, SIMULATION_UPDATE_RATE);
-    }
 
     getInfo() {
         the_locale = this._setLocale();
@@ -484,12 +442,7 @@ class Scratch3ArduinoOneGPIO {
     // command blocks
 
     digital_write(args) {
-        if (SIMULATION_MODE) {
-            const pin = parseInt(args['PIN'], 10);
-            const value = parseInt(args['ON_OFF'], 10);
-            mockDigitalInputs[pin] = value;
-            return;
-        }
+        console.log('digital_write called with pin:', args['PIN'], 'value:', args['ON_OFF']);
         if (!connected) {
             if (!connection_pending) {
                 this.connect();
@@ -521,12 +474,6 @@ class Scratch3ArduinoOneGPIO {
 
     //pwm
     pwm_write(args) {
-        if (SIMULATION_MODE) {
-            const pin = parseInt(args['PIN'], 10);
-            const value = parseInt(args['VALUE'], 10);
-            mockAnalogInputs[pin] = Math.floor((value / 100) * 1023);
-            return;
-        }
         if (!connected) {
             if (!connection_pending) {
                 this.connect();
@@ -563,10 +510,6 @@ class Scratch3ArduinoOneGPIO {
     }
 
     tone_on(args) {
-        if (SIMULATION_MODE) {
-            // Just simulate accepting the tone command
-            return;
-        }
         if (!connected) {
             if (!connection_pending) {
                 this.connect();
@@ -605,13 +548,6 @@ class Scratch3ArduinoOneGPIO {
 
     // move servo
     servo(args) {
-        if (SIMULATION_MODE) {
-            const pin = parseInt(args['PIN'], 10);
-            const angle = parseInt(args['ANGLE'], 10);
-            // Store the servo position (0-180 degrees)
-            mockDigitalInputs[pin] = angle;
-            return;
-        }
         if (!connected) {
             if (!connection_pending) {
                 this.connect();
@@ -646,11 +582,6 @@ class Scratch3ArduinoOneGPIO {
 
     // reporter blocks
     analog_read(args) {
-        if (SIMULATION_MODE) {
-            const pin = parseInt(args['PIN'], 10);
-            console.log(`Reading analog pin ${pin}: ${mockAnalogInputs[pin]}`); // Debug log
-            return mockAnalogInputs[pin];
-        }
         if (!connected) {
             if (!connection_pending) {
                 this.connect();
@@ -676,10 +607,6 @@ class Scratch3ArduinoOneGPIO {
     }
 
     digital_read(args) {
-        if (SIMULATION_MODE) {
-            const pin = parseInt(args['PIN'], 10);
-            return mockDigitalInputs[pin];
-        }
         if (!connected) {
             if (!connection_pending) {
                 this.connect();
@@ -705,10 +632,6 @@ class Scratch3ArduinoOneGPIO {
     }
 
     sonar_read(args) {
-        if (SIMULATION_MODE) {
-            // Simulate distance between 2cm and 400cm
-            return Math.floor(Math.random() * 398) + 2;
-        }
         if (!connected) {
             if (!connection_pending) {
                 this.connect();
@@ -778,66 +701,111 @@ class Scratch3ArduinoOneGPIO {
     }
 
     // helpers
-    connect() {
-
-        if (SIMULATION_MODE) {
-            console.log('Connected in simulation mode');
-            connected = true;
-            connection_pending = false;
-            return;
-        }
-
+    async connect() {
+        console.log('Attempting to connect to Arduino via Web Serial API...');
+        
         if (connected) {
-            // ignore additional connection attempts
+            console.log('Already connected, ignoring connection attempt');
             return;
-        } else {
-            connect_attempt = true;
-            window.socket = new WebSocket("ws://127.0.0.1:9000");
-            msg = JSON.stringify({"id": "to_arduino_gateway"});
         }
-
-
-        // websocket event handlers
-        window.socket.onopen = function () {
-
-            digital_inputs.fill(0);
-            analog_inputs.fill(0);
-            pin_modes.fill(-1);
-            // connection complete
+        
+        try {
+            // Request a port from the user
+            serialPort = await navigator.serial.requestPort();
+            
+            // Open the port with appropriate settings for Arduino (57600 baud is standard for Firmata)
+            await serialPort.open({ baudRate: 57600 });
+            
+            console.log('Serial port opened successfully');
+            
+            // Create reader and writer
+            writer = serialPort.writable.getWriter();
+            startReadLoop();
+            
+            // Set up connection state
             connected = true;
             connect_attempt = true;
-            // the message is built above
-            try {
-                //ws.send(msg);
-                window.socket.send(msg);
-
-            } catch (err) {
-                // ignore this exception
-            }
+            alerted = false;
+            
+            // Initialize the board
+            const initMsg = JSON.stringify({"id": "to_arduino_gateway"});
+            await sendSerial(initMsg);
+            
+            // Process any queued operations
             for (let index = 0; index < wait_open.length; index++) {
                 let data = wait_open[index];
                 data[0](data[1]);
             }
-        };
-
-        window.socket.onclose = function () {
-            digital_inputs.fill(0);
-            analog_inputs.fill(0);
-            pin_modes.fill(-1);
+        } catch (error) {
+            console.error('Error connecting to Arduino:', error);
             if (alerted === false) {
                 alerted = true;
-                alert(FormWSClosed[the_locale]);}
-            connected = false;
-        };
+                alert("Could not connect to Arduino. Make sure it's plugged in and has Firmata installed.");
+            }
+        }
+    }
 
-        // reporter messages from the board
-        window.socket.onmessage = function (message) {
-            msg = JSON.parse(message.data);
+    async sendSerial(data) {
+        if (!writer) return;
+        
+        try {
+            console.log('Sending to Arduino:', data);
+            const encoder = new TextEncoder();
+            const dataArrayBuffer = encoder.encode(data + '\n');
+            await writer.write(dataArrayBuffer);
+        } catch (error) {
+            console.error('Error sending data:', error);
+            handleDisconnect();
+        }
+    }
+    
+    // Add this method to start the read loop
+    async startReadLoop() {
+        if (readLoopActive) return;
+        readLoopActive = true;
+        
+        reader = serialPort.readable.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        
+        try {
+            while (readLoopActive) {
+                const { value, done } = await reader.read();
+                if (done) {
+                    break;
+                }
+                
+                buffer += decoder.decode(value);
+                
+                // Process complete messages in buffer
+                let endIndex;
+                while ((endIndex = buffer.indexOf('\n')) !== -1) {
+                    const message = buffer.slice(0, endIndex);
+                    buffer = buffer.slice(endIndex + 1);
+                    
+                    if (message.trim()) {
+                        console.log('Received message:', message);
+                        processSerialMessage(message);
+                    }
+                }
+            }
+        } catch (error) {
+            console.error('Error reading data:', error);
+        } finally {
+            reader.releaseLock();
+            readLoopActive = false;
+        }
+    }
+    
+    // Add this method to process incoming messages
+    processSerialMessage(messageText) {
+        try {
+            const msg = JSON.parse(messageText);
             let report_type = msg["report"];
             let pin = null;
             let value = null;
-
-            // types - digital, analog, sonar
+    
+            // Process messages the same way as before
             if (report_type === 'digital_input') {
                 pin = msg['pin'];
                 pin = parseInt(pin, 10);
@@ -852,7 +820,44 @@ class Scratch3ArduinoOneGPIO {
                 value = msg['value'];
                 digital_inputs[sonar_report_pin] = value;
             }
-        };
+        } catch (error) {
+            console.error('Error processing message:', error, messageText);
+        }
+    }
+    
+    // Add this method to handle disconnection
+    async handleDisconnect() {
+        if (!connected) return;
+        
+        try {
+            // Close everything properly
+            if (reader) {
+                readLoopActive = false;
+                reader.cancel();
+                reader = null;
+            }
+            
+            if (writer) {
+                writer.releaseLock();
+                writer = null;
+            }
+            
+            if (serialPort && serialPort.readable) {
+                await serialPort.close();
+            }
+            
+            serialPort = null;
+        } catch (error) {
+            console.error('Error during disconnect:', error);
+        } finally {
+            // Reset state
+            digital_inputs.fill(0);
+            analog_inputs.fill(0);
+            pin_modes.fill(-1);
+            connected = false;
+            
+            console.log('Disconnected from Arduino');
+        }
     }
 
 

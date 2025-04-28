@@ -37,6 +37,7 @@ class TeachableMachine {
         this.latestAudioResults = null;
         this.isLoading = false;
         this.loadingMessage = "";
+        this.modelErrorAlerted = false;
 
         // Constants
         this.INTERVAL = 33;
@@ -60,32 +61,32 @@ class TeachableMachine {
         if (this.loadingElement) {
             document.body.removeChild(this.loadingElement);
         }
-        
+
         // Create loading overlay
-        const loadingElement = document.createElement('div');
-        loadingElement.style.position = 'absolute';
-        loadingElement.style.top = '0';
-        loadingElement.style.left = '0';
-        loadingElement.style.width = '100%';
-        loadingElement.style.height = '40px';
-        loadingElement.style.backgroundColor = 'rgba(0, 0, 0, 0.7)';
-        loadingElement.style.color = 'white';
-        loadingElement.style.display = 'flex';
-        loadingElement.style.alignItems = 'center';
-        loadingElement.style.justifyContent = 'center';
-        loadingElement.style.zIndex = '9999';
-        loadingElement.style.fontFamily = 'sans-serif';
-        loadingElement.style.fontSize = '14px';
-        loadingElement.style.display = 'none';
-        
+        const loadingElement = document.createElement("div");
+        loadingElement.style.position = "absolute";
+        loadingElement.style.top = "0";
+        loadingElement.style.left = "0";
+        loadingElement.style.width = "100%";
+        loadingElement.style.height = "40px";
+        loadingElement.style.backgroundColor = "rgba(0, 0, 0, 0.7)";
+        loadingElement.style.color = "white";
+        loadingElement.style.display = "flex";
+        loadingElement.style.alignItems = "center";
+        loadingElement.style.justifyContent = "center";
+        loadingElement.style.zIndex = "9999";
+        loadingElement.style.fontFamily = "sans-serif";
+        loadingElement.style.fontSize = "14px";
+        loadingElement.style.display = "none";
+
         // Add spinner
         loadingElement.innerHTML = `
             <div style="margin-right: 10px; animation: spin 1s linear infinite; width: 20px; height: 20px; border: 3px solid #fff; border-top: 3px solid #4c97ff; border-radius: 50%;"></div>
             <span id="tm-loading-message">Loading...</span>
         `;
-        
+
         // Add animation
-        const style = document.createElement('style');
+        const style = document.createElement("style");
         style.textContent = `
             @keyframes spin {
                 0% { transform: rotate(0deg); }
@@ -93,29 +94,39 @@ class TeachableMachine {
             }
         `;
         document.head.appendChild(style);
-        
+
         document.body.appendChild(loadingElement);
         this.loadingElement = loadingElement;
     }
 
     // And update the setLoading method:
-setLoading(isLoading, message = "") {
-    this.isLoading = isLoading;
-    this.loadingMessage = message;
-    
-    // Ensure loading UI is setup
-    if (!this.loadingElement) {
-        this.setupLoadingUI();
+    setLoading(isLoading, message = "") {
+        this.isLoading = isLoading;
+        this.loadingMessage = message;
+
+        // Ensure loading UI is setup
+        if (!this.loadingElement) {
+            this.setupLoadingUI();
+        }
+
+        // Update loading UI
+        if (isLoading) {
+            this.loadingElement.style.display = "flex";
+            document.getElementById("tm-loading-message").textContent =
+                message || "Loading model...";
+        } else {
+            this.loadingElement.style.display = "none";
+        }
     }
-    
-    // Update loading UI
-    if (isLoading) {
-        this.loadingElement.style.display = 'flex';
-        document.getElementById('tm-loading-message').textContent = message || 'Loading model...';
-    } else {
-        this.loadingElement.style.display = 'none';
+
+    isModelLoaded() {
+        return (
+            this.teachableImageModel &&
+            this.predictionState &&
+            this.predictionState[this.teachableImageModel] &&
+            this.predictionState[this.teachableImageModel].model
+        );
     }
-}
 
     getInfo() {
         return {
@@ -133,10 +144,11 @@ setLoading(isLoading, message = "") {
                     arguments: {
                         URL: {
                             type: ArgumentType.STRING,
-                            defaultValue: "URL or ID",
+                            defaultValue: "Paste URL here",
                         },
                     },
                 },
+                
                 {
                     opcode: "whenModelMatches",
                     blockType: BlockType.HAT,
@@ -164,10 +176,11 @@ setLoading(isLoading, message = "") {
                         },
                     },
                 },
+                
                 {
                     opcode: "classConfidence",
                     blockType: BlockType.REPORTER,
-                    isTerminal: true,
+                    disableMonitor: true,
                     text: "confidence for [CLASS]",
                     arguments: {
                         CLASS: {
@@ -176,7 +189,6 @@ setLoading(isLoading, message = "") {
                         },
                     },
                 },
-
                 {
                     opcode: "videoToggle",
                     blockType: BlockType.COMMAND,
@@ -326,7 +338,7 @@ setLoading(isLoading, message = "") {
             this.predictionState[modelDataUrl] = {};
             this.setLoading(true, "Initializing model...");
             const { model, type } = await this.initModel(modelDataUrl);
-            
+
             this.setLoading(true, "Setting up prediction engine...");
             this.predictionState[modelDataUrl] = {
                 modelType: type,
@@ -655,13 +667,15 @@ setLoading(isLoading, message = "") {
                 }
             }
 
-            this.setLoading(true, "Loading model...");              
+            this.setLoading(true, "Loading model...");
             await this.startPredicting(modelUrl);
             this.updateStageModel(modelUrl);
             this.setLoading(false);
+            this.modelErrorAlerted = false;
         } catch (e) {
             this.setLoading(false);
             this.teachableImageModel = null;
+            this.modelErrorAlerted = false;
             console.error("Error loading model:", e);
         }
     }
@@ -727,6 +741,14 @@ setLoading(isLoading, message = "") {
     }
 
     model_match(args) {
+        if (!this.isModelLoaded()) {
+            if (!this.modelErrorAlerted) {
+                alert("No model loaded. Please load a Teachable Machine model first.");
+                this.modelErrorAlerted = true;
+            }
+            return false;
+        }
+        this.modelErrorAlerted = false;
         const modelUrl = this.teachableImageModel;
         const className = args.CLASS;
 
@@ -774,10 +796,26 @@ setLoading(isLoading, message = "") {
     }
 
     modelPrediction() {
+        if (!this.isModelLoaded()) {
+            if (!this.modelErrorAlerted) {
+                alert("No model loaded. Please load a Teachable Machine model first.");
+                this.modelErrorAlerted = true;
+            }
+            return "";
+        }
+        this.modelErrorAlerted = false;
         return this.getModelPrediction();
     }
 
     classConfidence(args) {
+        if (!this.isModelLoaded()) {
+            if (!this.modelErrorAlerted) {
+                alert("No model loaded. Please load a Teachable Machine model first.");
+                this.modelErrorAlerted = true;
+            }
+            return "";
+        }
+        this.modelErrorAlerted = false;
         return this.getClassConfidence(args);
     }
 
