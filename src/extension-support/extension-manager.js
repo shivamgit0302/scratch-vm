@@ -25,7 +25,11 @@ const builtinExtensions = {
     boost: () => require('../extensions/scratch3_boost'),
     gdxfor: () => require('../extensions/scratch3_gdx_for'),
     posebody: () => require('../extensions/scratch3_posebody'),
+    poseface: () => require('../extensions/scratch3_poseface'),
+    posehand: () => require('../extensions/scratch3_posehand'),
+    objectdetection: () => require('../extensions/scratch3_objectdetection'),
     onegpioArduino: () => require('../extensions/scratch3_onegpioArduino'),
+    onegpioRpiPico: () => require('../extensions/scratch3_onegpioRpiPico'),
     teachableMachine: () => require('../extensions/scratch3_teachablemachine')
 };
 

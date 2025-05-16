@@ -1,3 +1,4 @@
+/* eslint-disable */
 const BlockType = require("../../extension-support/block-type");
 const ArgumentType = require("../../extension-support/argument-type");
 const formatMessage = require("format-message");
